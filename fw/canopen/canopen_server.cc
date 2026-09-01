@@ -24,8 +24,8 @@ namespace moteus {
 
 namespace {
 // Values match the other Kinisi CANopen actuator nodes.
-constexpr auto kNmtControl = static_cast<CO_NMT_control_t>(
-    CO_NMT_ERR_ON_ERR_REG | CO_ERR_REG_GENERIC_ERR | CO_ERR_REG_COMMUNICATION);
+constexpr uint16_t kNmtControl =
+    CO_NMT_ERR_ON_ERR_REG | CO_ERR_REG_GENERIC_ERR | CO_ERR_REG_COMMUNICATION;
 constexpr uint16_t kFirstHbTimeMs = 500;
 constexpr uint16_t kSdoServerTimeoutMs = 1000;
 constexpr uint16_t kSdoClientTimeoutMs = 500;
@@ -237,7 +237,7 @@ void CanopenServer::UpdateFeedback() {
   // Emit an emergency message on any new fault.
   if (status.fault != last_fault_) {
     if (status.fault != moteus::errc::kSuccess) {
-      CO_errorReport(co_->em, CO_EM_GENERIC_ERROR, CO_EMC_DEVICE_HARDWARE,
+      CO_errorReport(co_->em, CO_EM_GENERIC_ERROR, CO_EMC_HARDWARE,
                      static_cast<uint32_t>(status.fault));
     } else {
       CO_errorReset(co_->em, CO_EM_GENERIC_ERROR, 0);
