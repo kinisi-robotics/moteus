@@ -166,7 +166,7 @@ existing gripper nodes from `kinisi_embedded`.
 - [x] Full firmware builds; fw host tests pass; app 443KB of 454KB region
       (CO_USE_GLOBALS statics ~3KB RAM; SizedPool untouched)
 
-### Phase 4 - ROS driver (kinisi_ros) -- CODE DONE 2026-09-01 (uncompiled)
+### Phase 4 - ROS driver (kinisi_ros) -- DONE 2026-09-01 (compiled + tested green)
 - [x] kinisi_ros branch moteus-canopen-driver, commit 0bb5c1d734 (NOT pushed)
 - [x] MoteusCan driver (moteus_can.hpp), MoteusControl (devices/moteus.hpp),
       config/Moteus/{data,pdos,sdos,types,moteus_canbus}.hpp,
@@ -177,10 +177,18 @@ existing gripper nodes from `kinisi_embedded`.
       velocity/effort/ticks/desired_position/enabled/operational/error/status.
       Effort gear-scaled (real torque, unlike Dynamixel mA passthrough).
       0x6009 errorCode PDO-mapped as INTEGER32 (3 TPDOs vs Dynamixel 2).
-- [ ] Compile in the kinisi_ros dev env (no ROS on this machine) + review the
-      agent-flagged items: identity check on by default; no auto-reboot-on-
-      fault policy; DynamixelControl has a pre-existing dangling-reference bug
-      (binds transform refs to a by-value ctor param) that MoteusControl avoids
+- [x] Compiled in dev container (x64/jazzy): `bm kinisi_canbus_hardware` EXIT 0
+      (547 actions); `bm test kinisi_canbus_hardware` 8/8 PASS incl.
+      test_canopen_migration (7 new moteus tests). Pushed; PR #10575 ready.
+- [ ] Review agent-flagged items at PR review: torque-in-Nm semantics; int32
+      errorCode -> 3 TPDOs; identity check on by default; no auto-reboot-on-
+      fault; DynamixelControl pre-existing dangling-ref bug (MoteusControl avoids)
+      -- suggest fixing Dynamixel separately.
+
+Note: reused the existing 4-week-old kinisi-jazzy-x64-dev image to compile
+(full image rebuild kept crashing WSL due to C: disk exhaustion; see
+[[kinisi-can-architecture]] WSL ops notes). A C++ package compile does not
+need a fresh image.
 
 ### Phase 5 — bench bring-up (needs hardware)
 - [ ] n1 + SWD probe + socketcan adapter @ 1 Mbps classic
