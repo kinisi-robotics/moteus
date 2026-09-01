@@ -37,6 +37,8 @@
 #include "fw/uuid.h"
 
 #if defined(TARGET_STM32G4)
+#include "fw/canopen/canopen_server.h"
+#include "fw/canopen/injectable_command_stream.h"
 #include "fw/fdcan.h"
 #include "fw/fdcan_micro_server.h"
 #include "fw/multi_transport_datagram_server.h"
@@ -267,8 +269,13 @@ int main(void) {
 
   micro::AsyncStream* serial = multiplex_protocol.MakeTunnel(1);
 
-  micro::AsyncExclusive<micro::AsyncWriteStream> write_stream(serial);
-  micro::CommandManager command_manager(&pool, serial, &write_stream);
+  // The command stream is wrapped so that the CANopen server can
+  // inject console commands (like "conf write") when requested over
+  // SDO.
+  InjectableCommandStream command_stream(serial);
+
+  micro::AsyncExclusive<micro::AsyncWriteStream> write_stream(&command_stream);
+  micro::CommandManager command_manager(&pool, &command_stream, &write_stream);
   char micro_output_buffer[2048] = {};
   micro::TelemetryManager telemetry_manager(
       &pool, &command_manager, &write_stream, micro_output_buffer);
@@ -300,6 +307,9 @@ int main(void) {
 
   GitInfo git_info;
   telemetry_manager.Register("git", &git_info);
+
+  CanopenServer canopen_server(
+      &fdcan, moteus_controller.bldc_servo(), &timer);
 
   CanConfig can_config, old_can_config;
 
@@ -412,6 +422,21 @@ int main(void) {
   moteus_controller.Start();
   command_manager.AsyncStart();
   multiplex_protocol.Start(moteus_controller.multiplex_server());
+  command_stream.Start();
+
+  if (can_config.mode == static_cast<uint8_t>(CanMode::kCanopen)) {
+    CanopenServer::Options canopen_options;
+    canopen_options.node_id = can_config.canopen_id;
+    canopen_options.node_id_updated = [&can_config](uint8_t node_id) {
+      can_config.canopen_id = node_id;
+    };
+    canopen_options.persist_requested = [&command_stream]() {
+      command_stream.Inject("conf write\n");
+    };
+    if (!canopen_server.Start(canopen_options)) {
+      mbed_die();
+    }
+  }
 
   auto old_time = timer.read_us();
 
@@ -419,6 +444,8 @@ int main(void) {
 #if defined(TARGET_STM32G4)
     multi_transport.Poll();
 #endif
+    canopen_server.Poll();
+    command_stream.Poll();
     moteus_controller.Poll();
     multiplex_protocol.Poll();
 
