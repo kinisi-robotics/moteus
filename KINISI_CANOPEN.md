@@ -166,10 +166,21 @@ existing gripper nodes from `kinisi_embedded`.
 - [x] Full firmware builds; fw host tests pass; app 443KB of 454KB region
       (CO_USE_GLOBALS statics ~3KB RAM; SizedPool untouched)
 
-### Phase 4 - ROS driver (kinisi_ros) -- IN PROGRESS
-- [x] Branch moteus-canopen-driver created in kinisi_ros
-- [ ] MoteusCan driver + config headers + xacro + type dispatch (mirror ZLAC/
-      Dynamixel patterns) - written, NOT compiled (needs ROS env), not pushed
+### Phase 4 - ROS driver (kinisi_ros) -- CODE DONE 2026-09-01 (uncompiled)
+- [x] kinisi_ros branch moteus-canopen-driver, commit 0bb5c1d734 (NOT pushed)
+- [x] MoteusCan driver (moteus_can.hpp), MoteusControl (devices/moteus.hpp),
+      config/Moteus/{data,pdos,sdos,types,moteus_canbus}.hpp,
+      urdf/hardware/moteus.ros2_control.xacro (macro "Moteus", type "moteus"),
+      wired through all 10 dispatch sites in canopen_hardware_interface,
+      +7 tests in test_canopen_migration.cpp
+- [x] Interfaces: cmd position/velocity/effort/control_word; state position/
+      velocity/effort/ticks/desired_position/enabled/operational/error/status.
+      Effort gear-scaled (real torque, unlike Dynamixel mA passthrough).
+      0x6009 errorCode PDO-mapped as INTEGER32 (3 TPDOs vs Dynamixel 2).
+- [ ] Compile in the kinisi_ros dev env (no ROS on this machine) + review the
+      agent-flagged items: identity check on by default; no auto-reboot-on-
+      fault policy; DynamixelControl has a pre-existing dangling-reference bug
+      (binds transform refs to a by-value ctor param) that MoteusControl avoids
 
 ### Phase 5 — bench bring-up (needs hardware)
 - [ ] n1 + SWD probe + socketcan adapter @ 1 Mbps classic
