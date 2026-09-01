@@ -100,6 +100,13 @@ void FDCan::ConfigureFilters(const FilterConfig& filters) {
   Init();
 }
 
+void FDCan::Reconfigure(const Options& options) {
+  const auto filters = options_.filters;
+  options_ = options;
+  options_.filters = filters;
+  Init();
+}
+
 void FDCan::Init() {
   const auto& options = options_;
 
@@ -309,13 +316,16 @@ bool ApplyOverride(bool value, FDCan::Override o) {
 }
 }
 
-void FDCan::Send(uint32_t dest_id,
-                 std::string_view data,
-                 const SendOptions& send_options) {
+FDCAN_TxHeaderTypeDef FDCan::MakeTxHeader(uint32_t dest_id,
+                                          size_t size,
+                                          const SendOptions& send_options) const {
+  const bool fd_frame = ApplyOverride(options_.fdcan_frame,
+                                      send_options.fdcan_frame);
 
-  // Abort anything we have started that hasn't finished.
-  if (last_tx_request_) {
-    HAL_FDCAN_AbortTxRequest(&hfdcan1_, last_tx_request_);
+  // Classic CAN frames can carry at most 8 bytes.  The larger DLC
+  // codes are only valid for FD frames.
+  if (!fd_frame && size > 8) {
+    mbed_die();
   }
 
   FDCAN_TxHeaderTypeDef tx_header;
@@ -327,18 +337,30 @@ void FDCan::Send(uint32_t dest_id,
       ApplyOverride(options_.remote_frame,
                     send_options.remote_frame) ?
       FDCAN_REMOTE_FRAME : FDCAN_DATA_FRAME;
-  tx_header.DataLength = RoundUpDlc(data.size());
+  tx_header.DataLength = RoundUpDlc(size);
   tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
   tx_header.BitRateSwitch =
       ApplyOverride(options_.bitrate_switch,
                     send_options.bitrate_switch) ?
       FDCAN_BRS_ON : FDCAN_BRS_OFF;
-  tx_header.FDFormat =
-      ApplyOverride(options_.fdcan_frame,
-                    send_options.fdcan_frame) ?
-      FDCAN_FD_CAN : FDCAN_CLASSIC_CAN;
+  tx_header.FDFormat = fd_frame ? FDCAN_FD_CAN : FDCAN_CLASSIC_CAN;
   tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
   tx_header.MessageMarker = 0;
+
+  return tx_header;
+}
+
+void FDCan::Send(uint32_t dest_id,
+                 std::string_view data,
+                 const SendOptions& send_options) {
+
+  // Abort anything we have started that hasn't finished.
+  if (last_tx_request_) {
+    HAL_FDCAN_AbortTxRequest(&hfdcan1_, last_tx_request_);
+  }
+
+  FDCAN_TxHeaderTypeDef tx_header =
+      MakeTxHeader(dest_id, data.size(), send_options);
 
   if (HAL_FDCAN_AddMessageToTxFifoQ(
           &hfdcan1_, &tx_header,
@@ -347,6 +369,26 @@ void FDCan::Send(uint32_t dest_id,
     mbed_die();
   }
   last_tx_request_ = HAL_FDCAN_GetLatestTxFifoQRequestBuffer(&hfdcan1_);
+}
+
+bool FDCan::TrySend(uint32_t dest_id,
+                    std::string_view data,
+                    const SendOptions& send_options) {
+  if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1_) == 0) {
+    return false;
+  }
+
+  FDCAN_TxHeaderTypeDef tx_header =
+      MakeTxHeader(dest_id, data.size(), send_options);
+
+  return HAL_FDCAN_AddMessageToTxFifoQ(
+      &hfdcan1_, &tx_header,
+      const_cast<uint8_t*>(
+          reinterpret_cast<const uint8_t*>(data.data()))) == HAL_OK;
+}
+
+int FDCan::TxQueueFree() {
+  return HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1_);
 }
 
 bool FDCan::Poll(FDCAN_RxHeaderTypeDef* header,

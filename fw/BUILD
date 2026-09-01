@@ -60,6 +60,32 @@ cc_library(
     copts = COPTS,
 )
 
+# The vendored CANopenNode stack plus the moteus object dictionary.
+# Compiled without the strict project copts since it is third party C
+# code.  See fw/canopen/CANopenNode/VENDORED.md.
+cc_library(
+    name = "canopen_node",
+    srcs = glob([
+        "canopen/CANopenNode/301/*.c",
+        "canopen/CANopenNode/303/*.c",
+        "canopen/CANopenNode/305/*.c",
+    ]) + [
+        "canopen/CANopenNode/CANopen.c",
+        "canopen/ObjectDictionary/OD.c",
+    ],
+    hdrs = glob([
+        "canopen/CANopenNode/**/*.h",
+    ]) + [
+        "canopen/CO_driver_target.h",
+        "canopen/ObjectDictionary/OD.h",
+    ],
+    includes = [
+        "canopen",
+        "canopen/CANopenNode",
+        "canopen/ObjectDictionary",
+    ],
+)
+
 cc_library(
     name = "git_info",
     hdrs = ["git_info.h"],
@@ -171,8 +197,13 @@ g4_mbed_binary(
         "fdcan_micro_server.h",
         "multi_transport_datagram_server.h",
         "uart_fdcanusb_micro_server.h",
+        "canopen/canopen_driver.h",
+        "canopen/canopen_driver.cc",
+        "canopen/canopen_server.h",
+        "canopen/canopen_server.cc",
+        "canopen/injectable_command_stream.h",
     ],
-    deps = MOTEUS_DEPS,
+    deps = MOTEUS_DEPS + [":canopen_node"],
     linker_script = "stm32g474.ld",
     features = ["speedopt"],
     copts = COPTS,

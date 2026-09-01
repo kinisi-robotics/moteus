@@ -96,6 +96,12 @@ class FDCan {
 
   FDCan(const Options& options = Options());
 
+  /// Re-initialize the peripheral with new options, preserving
+  /// whatever filters were most recently configured with
+  /// ConfigureFilters.  Any filter array previously passed to
+  /// ConfigureFilters must still be valid.
+  void Reconfigure(const Options& options);
+
   enum class Override {
     kDefault,
     kRequire,
@@ -117,6 +123,16 @@ class FDCan {
             std::string_view data,
             const SendOptions& = SendOptions());
 
+  /// Like Send, but does not abort any previously queued
+  /// transmission.  @return false if no room was available in the
+  /// transmit queue.
+  bool TrySend(uint32_t dest_id,
+               std::string_view data,
+               const SendOptions& = SendOptions());
+
+  /// The number of free slots in the hardware transmit queue.
+  int TxQueueFree();
+
   /// @return true if a packet was available.
   bool Poll(FDCAN_RxHeaderTypeDef* header, mjlib::base::string_span);
 
@@ -136,6 +152,10 @@ class FDCan {
 
  private:
   void Init();
+
+  FDCAN_TxHeaderTypeDef MakeTxHeader(uint32_t dest_id,
+                                     size_t size,
+                                     const SendOptions&) const;
 
   Options options_;
   Config config_;
