@@ -100,6 +100,13 @@ void FDCan::ConfigureFilters(const FilterConfig& filters) {
   Init();
 }
 
+void FDCan::Reconfigure(const Options& options) {
+  const auto filters = options_.filters;
+  options_ = options;
+  options_.filters = filters;
+  Init();
+}
+
 void FDCan::Init() {
   const auto& options = options_;
 
@@ -318,6 +325,15 @@ void FDCan::Send(uint32_t dest_id,
     HAL_FDCAN_AbortTxRequest(&hfdcan1_, last_tx_request_);
   }
 
+  const bool fd_frame = ApplyOverride(options_.fdcan_frame,
+                                      send_options.fdcan_frame);
+
+  // Classic CAN frames can carry at most 8 bytes.  The larger DLC
+  // codes are only valid for FD frames.
+  if (!fd_frame && data.size() > 8) {
+    mbed_die();
+  }
+
   FDCAN_TxHeaderTypeDef tx_header;
   tx_header.Identifier = dest_id;
   tx_header.IdType = ApplyOverride(
@@ -333,10 +349,7 @@ void FDCan::Send(uint32_t dest_id,
       ApplyOverride(options_.bitrate_switch,
                     send_options.bitrate_switch) ?
       FDCAN_BRS_ON : FDCAN_BRS_OFF;
-  tx_header.FDFormat =
-      ApplyOverride(options_.fdcan_frame,
-                    send_options.fdcan_frame) ?
-      FDCAN_FD_CAN : FDCAN_CLASSIC_CAN;
+  tx_header.FDFormat = fd_frame ? FDCAN_FD_CAN : FDCAN_CLASSIC_CAN;
   tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
   tx_header.MessageMarker = 0;
 

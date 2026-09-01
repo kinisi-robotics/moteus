@@ -138,18 +138,64 @@ MoteusHwPins g_hw_pins;
 }
 
 namespace {
+enum class CanMode : uint8_t {
+  // The stock moteus register protocol over CAN-FD.
+  kFdcan = 0,
+  // CANopen over classic CAN 2.0 at 1Mbps.  See KINISI_CANOPEN.md.
+  kCanopen = 1,
+};
+
 struct CanConfig {
   uint32_t prefix = 0;
+  uint8_t mode = static_cast<uint8_t>(CanMode::kFdcan);
+  uint8_t canopen_id = 127;
 
   template <typename Archive>
   void Serialize(Archive* a) {
     a->Visit(MJ_NVP(prefix));
+    a->Visit(MJ_NVP(mode));
+    a->Visit(MJ_NVP(canopen_id));
   }
 
   bool operator==(const CanConfig& rhs) const {
-    return prefix == rhs.prefix;
+    return prefix == rhs.prefix &&
+        mode == rhs.mode &&
+        canopen_id == rhs.canopen_id;
   }
 };
+
+FDCan::Options MakeCanOptions(CanMode mode) {
+  FDCan::Options options;
+
+  options.td = g_hw_pins.can_td;
+  options.rd = g_hw_pins.can_rd;
+
+  options.slow_bitrate = 1000000;
+  options.fast_bitrate = 5000000;
+
+  if (mode == CanMode::kCanopen) {
+    // CANopen uses classic CAN 2.0 frames with no bitrate
+    // switching.  Delay compensation is only meaningful during a BRS
+    // data phase.
+    options.fdcan_frame = false;
+    options.bitrate_switch = false;
+    options.delay_compensation = false;
+  } else {
+    options.fdcan_frame = true;
+    options.bitrate_switch = true;
+
+    // Family 0 uses a TCAN334GDCNT, which has a very low loop
+    // delay.  Other families use chips with a longer loop delay.
+    options.delay_compensation = g_measured_hw_family != 0;
+  }
+
+  options.automatic_retransmission = true;
+
+  options.tdc_offset = 13;  // 13 / 85MHz ~= 152ns
+  options.tdc_filter = 2; // 2 / 85MHz ~= 23ns
+
+  return options;
+}
 }
 
 int main(void) {
@@ -203,28 +249,10 @@ int main(void) {
 
   micro::SizedPool<24000> pool;
 
-  FDCan fdcan([]() {
-      FDCan::Options options;
-
-      options.td = g_hw_pins.can_td;
-      options.rd = g_hw_pins.can_rd;
-
-      options.slow_bitrate = 1000000;
-      options.fast_bitrate = 5000000;
-
-      options.fdcan_frame = true;
-      options.bitrate_switch = true;
-      options.automatic_retransmission = true;
-
-      // Family 0 uses a TCAN334GDCNT, which has a very low loop
-      // delay.  Other families use chips with a longer loop delay.
-      options.delay_compensation = g_measured_hw_family != 0;
-
-      options.tdc_offset = 13;  // 13 / 85MHz ~= 152ns
-      options.tdc_filter = 2; // 2 / 85MHz ~= 23ns
-
-      return options;
-    }());
+  // We start out in the stock CAN-FD mode.  If the persistent
+  // configuration selects a different mode, we reconfigure once it
+  // has been loaded below.
+  FDCan fdcan(MakeCanOptions(CanMode::kFdcan));
   FDCanMicroServer fdcan_micro_server(&fdcan);
 
   MultiTransportDatagramServer multi_transport(&fdcan_micro_server);
@@ -275,16 +303,31 @@ int main(void) {
 
   CanConfig can_config, old_can_config;
 
+  // The mode the FDCan peripheral is currently configured for.  We
+  // boot in the stock CAN-FD mode and only reconfigure if the
+  // persistent configuration requests something else.
+  uint8_t applied_can_mode = static_cast<uint8_t>(CanMode::kFdcan);
+
   // We always want to update our filters at least once.
   uint8_t old_multiplex_id = 255;
 
   const auto maybe_update_filters =
       [&can_config, &fdcan, &multi_transport, &old_can_config,
-       &old_multiplex_id, &multiplex_protocol]() {
+       &old_multiplex_id, &multiplex_protocol, &applied_can_mode]() {
         // Prevent the ID from being set to an unusable value.
         if (multiplex_protocol.config()->id < 1 ||
             multiplex_protocol.config()->id > 126) {
           multiplex_protocol.config()->id = 1;
+        }
+
+        // Prevent the mode from being set to an unknown value.
+        if (can_config.mode > static_cast<uint8_t>(CanMode::kCanopen)) {
+          can_config.mode = static_cast<uint8_t>(CanMode::kFdcan);
+        }
+
+        // CANopen node IDs must be in [1, 127].
+        if (can_config.canopen_id < 1 || can_config.canopen_id > 127) {
+          can_config.canopen_id = 127;
         }
 
         // We only update our config if it has actually changed.
@@ -297,7 +340,34 @@ int main(void) {
         old_can_config = can_config;
         old_multiplex_id = multiplex_protocol.config()->id;
 
-        FDCan::Filter filters[4] = {};
+        if (can_config.mode != applied_can_mode) {
+          applied_can_mode = can_config.mode;
+          fdcan.Reconfigure(
+              MakeCanOptions(static_cast<CanMode>(applied_can_mode)));
+
+          // In CANopen mode, the FDCan peripheral is owned by the
+          // CANopen server rather than the multiplex transport.
+          multi_transport.SetCanDisabled(
+              applied_can_mode == static_cast<uint8_t>(CanMode::kCanopen));
+        }
+
+        if (applied_can_mode == static_cast<uint8_t>(CanMode::kCanopen)) {
+          // Accept all standard 11-bit frames: the CANopen stack
+          // dispatches by COB-ID in software.  Reject extended
+          // frames.
+          FDCan::FilterConfig filter_config;
+          filter_config.global_std_action = FDCan::FilterAction::kAccept;
+          filter_config.global_ext_action = FDCan::FilterAction::kReject;
+          fdcan.ConfigureFilters(filter_config);
+
+          multi_transport.SetPrefix(can_config.prefix);
+          return;
+        }
+
+        // These filters are passed by reference to the FDCan
+        // peripheral and must remain valid if it is later
+        // re-initialized, thus they are static.
+        static FDCan::Filter filters[4] = {};
         filters[0].id1 = (can_config.prefix << 16) | old_multiplex_id;
         filters[0].id2 = 0x1fff00ffu;
         filters[0].mode = FDCan::FilterMode::kMask;

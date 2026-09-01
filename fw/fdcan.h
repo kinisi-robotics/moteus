@@ -96,6 +96,12 @@ class FDCan {
 
   FDCan(const Options& options = Options());
 
+  /// Re-initialize the peripheral with new options, preserving
+  /// whatever filters were most recently configured with
+  /// ConfigureFilters.  Any filter array previously passed to
+  /// ConfigureFilters must still be valid.
+  void Reconfigure(const Options& options);
+
   enum class Override {
     kDefault,
     kRequire,

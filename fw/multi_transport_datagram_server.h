@@ -52,7 +52,7 @@ class MultiTransportDatagramServer : public mjlib::multiplex::MicroDatagramServe
     pending_read_data_ = data;
 
     // Only start a new CAN read if one isn't already in flight.
-    if (!can_read_in_flight_) {
+    if (!can_disabled_ && !can_read_in_flight_) {
       can_read_in_flight_ = true;
       fdcan_->AsyncRead(&can_header_, can_buffer_,
                         [this](mjlib::micro::error_code ec, size_t size) {
@@ -113,10 +113,20 @@ class MultiTransportDatagramServer : public mjlib::multiplex::MicroDatagramServe
   }
 
   void Poll() {
-    fdcan_->Poll();
+    if (!can_disabled_) {
+      fdcan_->Poll();
+    }
     if (uart_server_) {
       uart_server_->Poll();
     }
+  }
+
+  // When the CAN transport is disabled, it is neither polled nor
+  // read from: some other component owns the FDCan peripheral (such
+  // as the CANopen server), while the UART transport continues to
+  // operate.
+  void SetCanDisabled(bool disabled) {
+    can_disabled_ = disabled;
   }
 
   uint32_t can_reset_count() const {
@@ -251,6 +261,7 @@ class MultiTransportDatagramServer : public mjlib::multiplex::MicroDatagramServe
   char can_buffer_data_[64] = {};
   mjlib::base::string_span can_buffer_{can_buffer_data_, sizeof(can_buffer_data_)};
   bool can_read_in_flight_ = false;
+  bool can_disabled_ = false;
 
   Header uart_header_;
   char uart_buffer_data_[64] = {};
