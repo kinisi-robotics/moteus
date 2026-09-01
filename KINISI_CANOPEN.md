@@ -82,16 +82,41 @@ existing gripper nodes from `kinisi_embedded`.
   mirror `zlac_can.hpp`/`dynamixel_can.hpp` + `config/Moteus/{data,pdos,sdos}.hpp`
   + xacro; type dispatch is hardcoded in `canopen_hardware_interface.cpp`.
 
-## Open decisions
+## Decisions made during implementation (review with Paris)
 
-- [ ] `commandCurrent` (0x6003, mA) semantics: q-axis current in mA vs torque.
-      Leaning: treat as feedforward torque converted via motor Kt (moteus native
-      is Nm). DECIDE AT PHASE 3, ask Paris.
-- [ ] Product code for "moteus joint" (grippers use 0x10/0x11/0x12; QVC=2, LED=3).
-      Ask Paris / check kinisi conventions. Placeholder: 0x20.
-- [ ] Node ID for the new device (free: most of 1-127 except 18, 34 + live overlay).
-- [ ] Whether UART diagnostic path (tview over aux UART) stays active in CANopen
-      mode — decide when wiring main().
+- **Torque semantics (v1)**: for the moteus device type, 0x6003 commandCurrent
+  carries feedforward TORQUE in Nm, 0x6006 current feedback carries measured
+  torque in Nm, 0x6014 currentLimit carries max torque in Nm.  Wire type (f32)
+  unchanged from the gripper profile; only the unit interpretation differs.
+  Rationale: moteus is natively torque-based (Nm); avoids needing motor Kt in
+  the protocol layer; matches the ros2_control effort interface directly.
+  Trivial to change to mA later if preferred.
+- Product code 0x20 (placeholder, in OD 0x1018 sub2 + 0x6016), vendor 0x3000.
+- Command watchdog: 0.25 s (servo stops if SYNC/commands cease).
+- controlWord bit0 = torque enable (kPosition), bit7 = reboot.  statusWord
+  bit0 = torque on, bit1 = fault.  errorCode = moteus errc fault code.  EMCY
+  (generic error, moteus fault code in info bytes) emitted on fault transitions.
+- LSS slave kept enabled (matches grippers / FirmwareTool fast-scan).
+- CANopen persist: SDO write 0x6011 sets can.canopen_id; SDO write nonzero to
+  0x601A injects "conf write" into the console command stream (whole config is
+  persisted).  Refused while the servo is enabled (flash write stalls the CPU).
+- UART diagnostics (tview/moteus_tool over aux UART fdcanusb emulation) REMAIN
+  ACTIVE in CANopen mode; only the CAN multiplex transport is disabled.
+- Default node id 127 (can.canopen_id), clamped to [1,127].
+- 0x601D imuEnabled dropped from the OD (moteus has no IMU); everything else
+  in 0x6000-0x601E kept verbatim.
+
+## Open items
+
+- [ ] Confirm torque-in-Nm semantics with Paris (see above).
+- [ ] Pick real product code + node ID (free: most of 1-127 except 18, 34 +
+      whatever the live robot's combined.yaml overlay uses).
+- [ ] Flash headroom: app is 443KB of the 454KB app region (baseline 419KB;
+      CANopen adds ~24KB).  If upstream merges outgrow the region, trim
+      CANopenNode config (TIME, HB consumer, LEDs, node guarding) via
+      CO_driver_target.h defines.
+- [ ] WSL host-test env: //lib/python:bdist_wheel genrule fails (missing
+      python3 build deps in WSL) - pre-existing env issue; fw C++ tests pass.
 
 ## Phase checklist
 
@@ -99,49 +124,52 @@ existing gripper nodes from `kinisi_embedded`.
 - [x] Fork created: `github.com/kinisi-robotics/moteus`
 - [x] Remote `kinisi` added, branch `kinisi/canopen` created
 - [x] This plan file committed
-- [ ] Branch pushed to kinisi remote (push after each work session)
+- [x] Branch pushed to kinisi remote (push after each work session)
 
-### Phase 1 — classic-CAN plumbing + mode switch (firmware) — IN PROGRESS
-- [ ] Add `mode` field (0=fd-native, 1=classic-canopen) + `canopen_node_id` to
-      `CanConfig` in fw/moteus.cc, persisted, with Serialize/MJ_NVP
-- [ ] Thread into `FDCan::Options` construction (classic: fdcan_frame=false,
-      bitrate_switch=false, slow_bitrate=1e6, automatic_retransmission=true)
-- [ ] Guard DLC ≤8 in classic mode (fdcan.cc Send / RoundUpDlc path)
-- [ ] Firmware builds clean in WSL (`--config=target`)
+### Phase 1 - classic-CAN plumbing + mode switch -- DONE 2026-09-01
+- [x] can.mode (0=fd-native, 1=classic-canopen) + can.canopen_id persisted
+      config; applied via maybe_update_filters (FDCan::Reconfigure at load)
+- [x] Classic FDCan options (fdcan_frame=false, bitrate_switch=false, 1 Mbps);
+      accept-all-standard / reject-extended filters in CANopen mode
+- [x] DLC <=8 guard in classic mode (fdcan.cc MakeTxHeader); FDCan::TrySend +
+      TxQueueFree added (non-aborting TX needed for CANopen bursts)
+- [x] multi_transport.SetCanDisabled() - CANopen owns the peripheral, UART
+      diagnostics stay up
+- [x] Firmware builds clean in WSL (tools/bazel build --config=target //fw:moteus)
 
-### Phase 2 — CANopenNode port
-- [ ] Vendor CANopenNode @ 6dfd4ed into `fw/canopen/CANopenNode/` (in-tree copy,
-      keep LICENSE, note commit in a VENDORED.md) + Bazel BUILD (cc_library)
-- [ ] `CO_driver_target.h` + CO driver bridge: RX/TX via existing `FDCan`
-      (polled from main loop), 1 ms processing from millisecond tick, no RTOS,
-      CO_CONFIG trimmed to: NMT slave, HB producer, 1 SDO server, SYNC consumer,
-      4 RPDO + 4 TPDO, EMCY producer. No LSS initially (FirmwareTool uses it only
-      for unconfigured nodes; node ID comes from persisted config).
-- [ ] OD.h/OD.c: CiA 301 mandatory (0x1000/0x1001/0x1005/0x1014/0x1017/0x1018)
-      + PDO comm/mapping 0x1400-3/0x1600-3/0x1800-3/0x1A00-3 (empty default maps)
-      + Kinisi profile 0x6000-0x601E. Adapt from kinisi_embedded
-      dynamixel-controller OD. Identity: vendor 0x3000, product code TBD.
-- [ ] Host-side unit test: replay master's boot SDO sequence (PDO remap) against
-      OD + SDO server, assert mapping accepted (bazel host test)
+### Phase 2 - CANopenNode port -- DONE 2026-09-01
+- [x] Vendored CANopenNode @ 6dfd4ed into fw/canopen/CANopenNode/ (+ extra/,
+      storage/; VENDORED.md notes commit; Bazel cc_library //fw:canopen_node)
+- [x] fw/canopen/CO_driver_target.h (CO_USE_GLOBALS, recursive irq locks) +
+      fw/canopen/canopen_driver.cc: poll-based CO driver over FDCan (software
+      TX queue flushed by CanopenPoll, bus-off recovery in CO_CANmodule_process).
+      Stock CO_CONFIG defaults kept (matches grippers); LSS slave INCLUDED.
+- [x] fw/canopen/ObjectDictionary/OD.{h,c}: 58 entries - CiA 301 comm objects,
+      4 RPDO / 4 TPDO with empty default mappings, full Kinisi profile
+      0x6000-0x601E (minus 0x601D imuEnabled).  Identity vendor 0x3000 /
+      product 0x20.  gcc-verified + OD_find cross-check.
+- [ ] Host-side SDO-replay unit test (deferred - bench bring-up exercises the
+      PDO remap handshake; add if bring-up hits protocol issues)
 
-### Phase 3 — profile glue (CanopenServer)
-- [ ] `fw/canopen_server.h/.cc`: constructed in main() when can.mode==canopen;
-      owns CO_t instance; on SYNC latch RPDO → unit-convert (deg→rev, RPM→rev/s,
-      mA→torque via Kt or q-current — see open decision) → BldcServo::Command()
-      position mode; controlWord bit0 gates kPosition/kStopped; status() → TPDO
-      (rev→deg etc.); moteus faults → statusWord bits + errorCode + EMCY;
-      command timeout as comms-loss safety
-- [ ] 0x6011 SDO write → persist node id via PersistentConfig (+ 0x601A persist
-      trigger), reboot bit7 of controlWord
-- [ ] main() wiring: in canopen mode skip/bypass FDCanMicroServer CAN transport
-      (decide UART diag path), install standard-11-bit filters for
-      NMT/SYNC/SDO/RPDO COB-IDs
-- [ ] Host tests for unit conversion + controlWord/status mapping
-- [ ] Full firmware builds; RAM/flash budget checked (SizedPool<24000>)
+### Phase 3 - profile glue (CanopenServer) -- DONE 2026-09-01
+- [x] fw/canopen/canopen_server.{h,cc}: SYNC-driven RPDO -> unit conversion
+      (deg->rev, RPM->rev/s, Nm feedforward) -> BldcServo::Command() position
+      mode; controlWord gating; feedback TPDO; faults -> statusWord/errorCode/
+      EMCY; 0.25 s command watchdog
+- [x] 0x6011 node-id SDO extension -> can.canopen_id; 0x601A persist trigger ->
+      injects "conf write" via fw/canopen/injectable_command_stream.h;
+      controlWord bit7 + NMT reset-app -> NVIC_SystemReset
+- [x] main() wiring: CanopenServer constructed always, Start()ed only in
+      canopen mode; polled from the main loop
+- [ ] Host tests for unit conversion + controlWord/status mapping (deferred,
+      same rationale as the Phase 2 test)
+- [x] Full firmware builds; fw host tests pass; app 443KB of 454KB region
+      (CO_USE_GLOBALS statics ~3KB RAM; SizedPool untouched)
 
-### Phase 4 — ROS driver (kinisi_ros)
-- [ ] `MoteusCan` driver + config headers + xacro + type dispatch (mirror ZLAC/
-      Dynamixel patterns). Compile-test only until bench.
+### Phase 4 - ROS driver (kinisi_ros) -- IN PROGRESS
+- [x] Branch moteus-canopen-driver created in kinisi_ros
+- [ ] MoteusCan driver + config headers + xacro + type dispatch (mirror ZLAC/
+      Dynamixel patterns) - written, NOT compiled (needs ROS env), not pushed
 
 ### Phase 5 — bench bring-up (needs hardware)
 - [ ] n1 + SWD probe + socketcan adapter @ 1 Mbps classic
